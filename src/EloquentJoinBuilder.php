@@ -15,7 +15,7 @@ use Illuminate\Database\Eloquent\SoftDeletingScope;
 class EloquentJoinBuilder extends Builder
 {
     //use table alias for join (real table name or uniqid())
-    private $useTableAlias = false;
+    private $useTableAlias = true;
 
     //store if ->select(...) is already called on builder (we want only one groupBy())
     private $selected = false;
