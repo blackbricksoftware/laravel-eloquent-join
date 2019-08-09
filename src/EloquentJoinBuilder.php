@@ -13,6 +13,7 @@ use Fico7489\Laravel\EloquentJoin\Relations\HasOneJoin;
 use Fico7489\Laravel\EloquentJoin\Relations\HasManyJoin;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
+use Illuminate\Database\Query\JoinClause;
 
 class EloquentJoinBuilder extends Builder
 {
@@ -47,6 +48,7 @@ class EloquentJoinBuilder extends Builder
     //store clauses on relation for join
     public $relationClauses = [];
 
+    //query methods
     public function where($column, $operator = null, $value = null, $boolean = 'and')
     {
         if ($column instanceof \Closure) {
@@ -80,6 +82,38 @@ class EloquentJoinBuilder extends Builder
         return $this->orWhere($column, $operator, $value);
     }
 
+    public function whereInJoin($column, $values, $boolean = 'and', $not = false)
+    {
+        $query = $this->baseBuilder ? $this->baseBuilder : $this;
+        $column = $query->performJoin($column);
+
+        return $this->whereIn($column, $values, $boolean, $not);
+    }
+
+    public function whereNotInJoin($column, $values, $boolean = 'and')
+    {
+        $query = $this->baseBuilder ? $this->baseBuilder : $this;
+        $column = $query->performJoin($column);
+
+        return $this->whereNotIn($column, $values, $boolean);
+    }
+
+    public function orWhereInJoin($column, $values)
+    {
+        $query = $this->baseBuilder ? $this->baseBuilder : $this;
+        $column = $query->performJoin($column);
+
+        return $this->orWhereIn($column, $values);
+    }
+
+    public function orWhereNotInJoin($column, $values)
+    {
+        $query = $this->baseBuilder ? $this->baseBuilder : $this;
+        $column = $query->performJoin($column);
+
+        return $this->orWhereNotIn($column, $values);
+    }
+
     public function orderByJoin($column, $direction = 'asc', $aggregateMethod = null)
     {
         $dotPos = strrpos($column, '.');
@@ -87,12 +121,19 @@ class EloquentJoinBuilder extends Builder
         $query = $this->baseBuilder ? $this->baseBuilder : $this;
         $column = $query->performJoin($column);
         if (false !== $dotPos) {
+            //order by related table field
             $aggregateMethod = $aggregateMethod ? $aggregateMethod : $this->aggregateMethod;
             $this->checkAggregateMethod($aggregateMethod);
-            $query->selectRaw($aggregateMethod.'('.$column.') as sort');
 
-            return $this->orderByRaw('sort '.$direction);
+            $sortsCount = count($this->query->orders ?? []);
+            $sortAlias = 'sort'.(0 == $sortsCount ? '' : ($sortsCount + 1));
+
+            $query->selectRaw($aggregateMethod.'('.$column.') as '.$sortAlias);
+
+            return $this->orderByRaw($sortAlias.' '.$direction);
         }
+
+        //order by base table field
 
         return $this->orderBy($column, $direction);
     }
@@ -107,6 +148,7 @@ class EloquentJoinBuilder extends Builder
         return $this;
     }
 
+    //helpers methods
     private function performJoin($relations, $leftJoin = null)
     {
         //detect join method
@@ -122,7 +164,6 @@ class EloquentJoinBuilder extends Builder
 
         $currentModel      = $baseModel;
         $currentTableAlias = $baseTable;
-        $currentPrimaryKey = $baseModel->getKeyName();
 
         $relationsAccumulated = [];
         foreach ($relations as $relation) {
@@ -134,8 +175,8 @@ class EloquentJoinBuilder extends Builder
             /** @var Relation $relatedRelation */
             $relatedRelation   = $currentModel->$relation();
             $relatedModel      = $relatedRelation->getRelated();
-            $relatedTable      = $relatedModel->getTable();
             $relatedPrimaryKey = $relatedModel->getKeyName();
+            $relatedTable      = $relatedModel->getTable();
             $relatedTableAlias = $this->useTableAlias ? uniqid() : $relatedTable;
 
             $relationsAccumulated[]    = $relatedTableAlias;
@@ -143,25 +184,29 @@ class EloquentJoinBuilder extends Builder
 
             //relations count
             if ($this->appendRelationsCount) {
-                $this->selectRaw('COUNT('.$relatedTable.'.'.$relatedPrimaryKey.') as '.$relationAccumulatedString.'_count');
+                $this->selectRaw('COUNT('.$relatedTableAlias.'.'.$relatedPrimaryKey.') as '.$relationAccumulatedString.'_count');
             }
 
             if (!in_array($relationAccumulatedString, $this->joinedTables)) {
                 $joinQuery = $relatedTable.($this->useTableAlias ? ' as '.$relatedTableAlias : '');
                 if ($relatedRelation instanceof BelongsToJoin) {
-                    $relatedKey = $relatedRelation->getForeignKey();
+                    $relatedKey = ((float) \App::version() < 5.8) ? $relatedRelation->getQualifiedForeignKey() : $relatedRelation->getQualifiedForeignKeyName();
+                    $relatedKey = last(explode('.', $relatedKey));
+                    $ownerKey = ((float) \App::version() < 5.8) ? $relatedRelation->getOwnerKey() : $relatedRelation->getOwnerKeyName();
 
-                    $this->$joinMethod($joinQuery, function ($join) use ($relatedRelation, $relatedTableAlias, $relatedPrimaryKey, $currentTableAlias, $relatedKey) {
-                        $join->on($relatedTableAlias.'.'.$relatedPrimaryKey, '=', $currentTableAlias.'.'.$relatedKey);
+                    $this->$joinMethod($joinQuery, function ($join) use ($relatedRelation, $relatedTableAlias, $relatedKey, $currentTableAlias, $ownerKey) {
+                        $join->on($relatedTableAlias.'.'.$ownerKey, '=', $currentTableAlias.'.'.$relatedKey);
 
                         $this->joinQuery($join, $relatedRelation, $relatedTableAlias);
                     });
                 } elseif ($relatedRelation instanceof HasOneJoin  ||  $relatedRelation instanceof HasManyJoin) {
                     $relatedKey = $relatedRelation->getQualifiedForeignKeyName();
                     $relatedKey = last(explode('.', $relatedKey));
+                    $localKey = $relatedRelation->getQualifiedParentKeyName();
+                    $localKey = last(explode('.', $localKey));
 
-                    $this->$joinMethod($joinQuery, function ($join) use ($relatedRelation, $relatedTableAlias, $relatedPrimaryKey, $currentTableAlias, $relatedKey, $currentPrimaryKey) {
-                        $join->on($relatedTableAlias.'.'.$relatedKey, '=', $currentTableAlias.'.'.$currentPrimaryKey);
+                    $this->$joinMethod($joinQuery, function ($join) use ($relatedRelation, $relatedTableAlias, $relatedKey, $currentTableAlias, $localKey) {
+                        $join->on($relatedTableAlias.'.'.$relatedKey, '=', $currentTableAlias.'.'.$localKey);
 
                         $this->joinQuery($join, $relatedRelation, $relatedTableAlias);
                     });
@@ -172,7 +217,6 @@ class EloquentJoinBuilder extends Builder
 
             $currentModel      = $relatedModel;
             $currentTableAlias = $relatedTableAlias;
-            $currentPrimaryKey = $relatedPrimaryKey;
 
             $this->joinedTables[] = implode('_', $relationsAccumulated);
         }
@@ -210,7 +254,7 @@ class EloquentJoinBuilder extends Builder
         }
     }
 
-    private function applyClauseOnRelation($join, $method, $params, $relatedTableAlias)
+    private function applyClauseOnRelation(JoinClause $join, string $method, array $params, string $relatedTableAlias)
     {
         if (in_array($method, ['where', 'orWhere'])) {
             try {
